@@ -175,3 +175,41 @@ git push origin main
 ```
 
 `MAX_CONCURRENT_DOWNLOADS=1` သို့မဟုတ် `2` ကို စတင်အသုံးပြုရန် အကြံပြုသည်။ 4K download များအတွက် CPU၊ disk နှင့် upload bandwidth ပိုသုံးနိုင်သောကြောင့် Railway logs တွင် memory/storage error ရှိ/မရှိ စောင့်ကြည့်ပါ။
+
+## Premium button-first interface
+
+Version အသစ်၏ entry screen သည် command များကို မှတ်သားစရာမလိုဘဲ button များဖြင့် စတင်အသုံးပြုနိုင်သော dashboard ဖြစ်သည်။ Home screen တွင် `Download Video`, `Music Search`, `Settings` နှင့် `Help` ပါဝင်ပြီး screen တိုင်းတွင် `Home` ပြန်သွားနိုင်သည်။
+
+### User flow
+
+```text
+/start
+   ↓
+Premium Home Dashboard
+   ├── Download Video → Send Link → Link Preview → Quality Grid → Live Data Bar → File
+   ├── Music Search   → Type Query → Result Buttons → Download MP3
+   ├── Settings       → Limits / Current Configuration
+   └── Help           → Guided Instructions → Start Download
+```
+
+Download screen သည် title၊ uploader နှင့် duration ကို preview ပြပြီး quality ကို grid buttons ဖြင့် ရွေးစေသည်။ Processing အချိန်တွင် progress message သည် percentage၊ data size၊ speed နှင့် ETA ကို live ပြသသည်။ Download ရပ်လိုလျှင် `/cancel` သို့မဟုတ် inline Cancel button ကို အသုံးပြုနိုင်သည်။
+
+## YouTube/Music မအလုပ်လုပ်သည့် ပြဿနာပြင်ဆင်ချက်
+
+လက်ရှိ fix တွင် အရေးကြီးသော အချက်သုံးချက်ကို ထည့်ထားသည်။ ပထမအချက်မှာ `main.py` တွင် လိုအပ်နေသော `asyncio` import ကို ပြန်ထည့်ထားခြင်းဖြစ်သည်။ ဒုတိယအချက်မှာ YouTube ၏ JavaScript challenge များကို ဖြေရှင်းရန် Deno runtime ကို Docker image ထဲ ထည့်ထားခြင်းဖြစ်သည်။ yt-dlp ၏ official EJS guide အရ YouTube download အတွက် external JavaScript runtime လိုအပ်နိုင်ပြီး Deno ကို recommended runtime အဖြစ် ဖော်ပြထားသည်။ [6]
+
+တတိယအချက်မှာ `requirements.txt` ကို `yt-dlp[default]` သို့ ပြောင်းထားခြင်းဖြစ်ပြီး companion EJS dependency များကို ထည့်သွင်းနိုင်စေသည်။ `Dockerfile` သည် FFmpeg၊ Deno နှင့် Python packages များကို build လုပ်ပေးမည်။
+
+### Railway တွင် အရေးကြီးသော redeploy steps
+
+GitHub repository သို့ update files များ push ပြီး Railway တွင် **Redeploy** လုပ်ပါ။ Build log ထဲတွင် `deno` download အဆင့်နှင့် `pip install yt-dlp[default]` အောင်မြင်ကြောင်း စစ်ပါ။ Service Variables တွင် `BOT_TOKEN` ရှိနေကြောင်း သေချာပါစေ။ Build cache ကြောင့် version အဟောင်းသုံးနေပါက Railway တွင် redeploy with cache clear option ရှိလျှင် အသုံးပြုပါ သို့မဟုတ် new deployment trigger လုပ်ပါ။
+
+```bash
+git add main.py requirements.txt Dockerfile README.md
+git commit -m "Fix YouTube extractor and music search runtime"
+git push origin main
+```
+
+Deploy ပြီးနောက် `/start` → `Download Video` → public YouTube URL → `360p` ကို ပထမဆုံးစမ်းပါ။ Music အတွက် `Music Search` button → `artist song title` ရိုက် → result button → `Download MP3` ကို စမ်းပါ။ 4K ကို အရင်မစမ်းဘဲ 360p/720p ဖြင့် service တက်ကြောင်း အတည်ပြုခြင်းက ပိုသင့်တော်သည်။
+
+[6]: https://github.com/yt-dlp/yt-dlp/wiki/ejs "yt-dlp official External JavaScript Runtime and EJS setup guide"
