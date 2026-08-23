@@ -99,6 +99,7 @@ def format_keyboard(token: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📺 720p HD", callback_data=f"fmt:{token}:720"), InlineKeyboardButton("🎬 1080p", callback_data=f"fmt:{token}:1080")],
         [InlineKeyboardButton("💎 2K", callback_data=f"fmt:{token}:2k"), InlineKeyboardButton("💎 4K", callback_data=f"fmt:{token}:4k")],
         [InlineKeyboardButton("✖ Cancel", callback_data=f"cancel:{token}")],
+        [InlineKeyboardButton("⌂  Home", callback_data="ui:home")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -172,29 +173,118 @@ async def edit_progress(bot, chat_id: int, message_id: int, state: dict, phase: 
             log.debug("progress edit skipped: %s", exc)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not permitted(update):
-        return
-    await update.message.reply_text(
-        "<b>⚡ STREAMLINE DOWNLOADER</b>\n\n"
-        "YouTube • TikTok • Facebook\n"
-        "MP3 • 240p • 360p • 480p • 720p • 1080p • 2K • 4K\n\n"
-        "🔗 Link တစ်ခု ပို့ပြီး quality ရွေးပါ။\n"
-        "🎵 Music ရှာရန် <code>/music artist - song</code>\n"
-        "🛑 လက်ရှိအလုပ်ကို ရပ်ရန် <code>/cancel</code>\n\n"
-        "<i>ကိုယ်ပိုင် သို့မဟုတ် ခွင့်ပြုထားသော content ကိုသာ အသုံးပြုပါ။</i>", parse_mode="HTML"
+def home_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬇️  Download Video", callback_data="ui:download")],
+        [InlineKeyboardButton("🎵  Music Search", callback_data="ui:music")],
+        [InlineKeyboardButton("⚙️  Settings", callback_data="ui:settings"), InlineKeyboardButton("❓  Help", callback_data="ui:help")],
+    ])
+
+
+def back_home_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⌂  Home", callback_data="ui:home")]])
+
+
+async def show_home(message, edit: bool = False) -> None:
+    text = (
+        "<b>⚡ STREAMLINE</b>  <i>MEDIA DOWNLOADER</i>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<b>Fast. Clean. Simple.</b>\n\n"
+        "Download videos and audio from\n"
+        "YouTube  •  TikTok  •  Facebook\n\n"
+        "<i>Choose an action below to get started.</i>"
     )
+    if edit:
+        await message.edit_text(text, parse_mode="HTML", reply_markup=home_keyboard())
+    else:
+        await message.reply_text(text, parse_mode="HTML", reply_markup=home_keyboard())
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if permitted(update):
+        context.user_data["mode"] = "home"
+        await show_home(update.message)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if permitted(update):
-        await start(update, context)
+        await show_help(update.message)
+
+
+async def show_help(message) -> None:
+    text = (
+        "<b>❓ HOW IT WORKS</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>1.</b> Tap <b>Download Video</b>\n"
+        "<b>2.</b> Send a public video link\n"
+        "<b>3.</b> Choose MP3 or video quality\n"
+        "<b>4.</b> Watch the live download progress\n\n"
+        "<b>Supported:</b> YouTube, TikTok, Facebook\n"
+        "<b>Quality:</b> MP3 to 4K where the source provides it\n\n"
+        "<i>Only download content you own or have permission to use.</i>"
+    )
+    await message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬇️  Start Download", callback_data="ui:download")],
+        [InlineKeyboardButton("⌂  Home", callback_data="ui:home")],
+    ]))
+
+
+async def ui_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not permitted(update):
+        return
+    action = query.data.split(":", 1)[1]
+    if action == "home":
+        context.user_data["mode"] = "home"
+        await show_home(query.message, edit=True)
+    elif action == "download":
+        context.user_data["mode"] = "await_url"
+        await query.edit_message_text(
+            "<b>⬇️ DOWNLOAD VIDEO</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+            "Send a public YouTube, TikTok or Facebook link here.\n\n"
+            "<i>Tip: You can paste a link directly from your share menu.</i>",
+            parse_mode="HTML", reply_markup=back_home_keyboard()
+        )
+    elif action == "music":
+        context.user_data["mode"] = "music"
+        await query.edit_message_text(
+            "<b>🎵 MUSIC SEARCH</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+            "Type an artist and song title.\n\n"
+            "<code>Example: The Weeknd Blinding Lights</code>",
+            parse_mode="HTML", reply_markup=back_home_keyboard()
+        )
+    elif action == "settings":
+        await query.edit_message_text(
+            "<b>⚙️ SETTINGS</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+            "Quality ကို download တစ်ခုချင်းစီတွင် ရွေးနိုင်ပါတယ်။\n"
+            f"Concurrent jobs: <b>{MAX_CONCURRENT}</b>\n"
+            f"Timeout: <b>{DOWNLOAD_TIMEOUT}s</b>\n\n"
+            "<i>Admin က Railway Variables မှတစ်ဆင့် limits ပြောင်းနိုင်ပါတယ်။</i>",
+            parse_mode="HTML", reply_markup=back_home_keyboard()
+        )
+    elif action == "help":
+        await query.edit_message_text(
+            "<b>❓ HELP CENTER</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+            "<b>Download:</b> Link ပို့ပြီး quality button ရွေးပါ။\n"
+            "<b>Music:</b> Music Search ထဲတွင် artist/title ရိုက်ပါ။\n"
+            "<b>Progress:</b> Data, speed နှင့် ETA ကို live ပြပါမယ်။\n"
+            "<b>Cancel:</b> /cancel သို့မဟုတ် Cancel button နှိပ်ပါ။\n\n"
+            "<i>Public နှင့် ခွင့်ပြုထားသော content ကိုသာ အသုံးပြုပါ။</i>",
+            parse_mode="HTML", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬇️  Start Download", callback_data="ui:download")],
+                [InlineKeyboardButton("⌂  Home", callback_data="ui:home")],
+            ])
+        )
 
 
 async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not permitted(update):
         return
     text = (update.message.text or "").strip()
+    if context.user_data.get("mode") == "music" and not valid_url(text):
+        await search_music(update.message, text)
+        return
     if not valid_url(text):
         await update.message.reply_text("⚠️ YouTube, TikTok, သို့မဟုတ် Facebook public URL အပြည့်အစုံကို ပို့ပါ။")
         return
@@ -301,6 +391,28 @@ async def cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text("ဒီ request သက်တမ်းကုန်သွားပါပြီ။")
 
 
+async def search_music(message, query_text: str) -> None:
+    if not query_text:
+        await message.reply_text("Artist နှင့် song title ကို ရိုက်ပါ။")
+        return
+    status = await message.reply_text("🎵 <b>SEARCHING MUSIC…</b>", parse_mode="HTML")
+    try:
+        opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            data = await asyncio.to_thread(ydl.extract_info, f"ytsearch5:{query_text}", False)
+        entries = data.get("entries", [])[:5]
+        if not entries:
+            await status.edit_text("ရှာမတွေ့ပါ။")
+            return
+        token = uuid.uuid4().hex[:10]
+        MUSIC_RESULTS[token] = [e.get("webpage_url") or e.get("url") for e in entries if e.get("webpage_url") or e.get("url")]
+        keyboard = [[InlineKeyboardButton(f"🎵 {(e.get('title') or 'Unknown')[:55]}", callback_data=f"music:{token}:{i}")] for i, e in enumerate(entries)]
+        await status.edit_text("<b>🎵 MUSIC RESULTS</b>\n━━━━━━━━━━━━━━━━━━\n\nရွေးချယ်ပါ:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception:
+        log.exception("music search failed")
+        await status.edit_text("❌ Music search မအောင်မြင်ပါ။ နောက်တစ်ကြိမ် ပြန်စမ်းပါ။")
+
+
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not permitted(update):
         return
@@ -354,6 +466,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("music", music_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
+    app.add_handler(CallbackQueryHandler(ui_navigation, pattern=r"^ui:(home|download|music|settings|help)$"))
     app.add_handler(CallbackQueryHandler(cancel_button, pattern=r"^cancel:[a-f0-9]+$"))
     app.add_handler(CallbackQueryHandler(format_selected, pattern=r"^fmt:[a-f0-9]+:(mp3|240|360|480|720|1080|2k|4k)$"))
     app.add_handler(CallbackQueryHandler(music_selected, pattern=r"^music:[a-f0-9]+:\d+$"))
