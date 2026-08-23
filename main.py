@@ -69,6 +69,18 @@ def valid_url(value: str) -> bool:
         return False
 
 
+def extract_supported_url(text: str) -> str | None:
+    """Accept a raw URL or a Telegram share caption containing one URL."""
+    candidate = text.strip()
+    if valid_url(candidate):
+        return candidate
+    for found in re.findall(r"https?://[^\s<>]+", candidate):
+        found = found.rstrip(".,!?)\\\"]'")
+        if valid_url(found):
+            return found
+    return None
+
+
 def human_size(value: float | int | None) -> str:
     if not value:
         return "—"
@@ -107,6 +119,14 @@ def format_keyboard(token: str) -> InlineKeyboardMarkup:
 def safe_filename(name: str, extension: str) -> str:
     cleaned = re.sub(r"[^\w\-. ()\[\]]+", "_", name, flags=re.UNICODE).strip(" .")
     return (cleaned[:120] or "download") + extension
+
+
+def entry_url(entry: dict) -> str | None:
+    url = entry.get("webpage_url") or entry.get("url")
+    if url and str(url).startswith("http"):
+        return str(url)
+    video_id = entry.get("id")
+    return f"https://www.youtube.com/watch?v={video_id}" if video_id else None
 
 
 def preview_media(url: str) -> dict:
@@ -281,12 +301,13 @@ async def ui_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not permitted(update):
         return
-    text = (update.message.text or "").strip()
-    if context.user_data.get("mode") == "music" and not valid_url(text):
-        await search_music(update.message, text)
+    raw_text = (update.message.text or "").strip()
+    text = extract_supported_url(raw_text)
+    if context.user_data.get("mode") == "music" and not text:
+        await search_music(update.message, raw_text)
         return
-    if not valid_url(text):
-        await update.message.reply_text("⚠️ YouTube, TikTok, သို့မဟုတ် Facebook public URL အပြည့်အစုံကို ပို့ပါ။")
+    if not text:
+        await update.message.reply_text("⚠️ YouTube, TikTok, သို့မဟုတ် Facebook public URL အပြည့်အစုံကို ပို့ပါ။ Link ကို caption/text ထဲမှာပါ ထည့်ပို့နိုင်ပါတယ်။")
         return
     if update.effective_user.id in USER_ACTIVE:
         await update.message.reply_text("⏳ Download တစ်ခု လုပ်ဆောင်နေပါတယ်။ ပြီးအောင်စောင့်ပါ သို့မဟုတ် /cancel ရိုက်ပါ။")
@@ -404,9 +425,11 @@ async def search_music(message, query_text: str) -> None:
         if not entries:
             await status.edit_text("ရှာမတွေ့ပါ။")
             return
+        results = [(e, entry_url(e)) for e in entries]
+        results = [(e, url) for e, url in results if url]
         token = uuid.uuid4().hex[:10]
-        MUSIC_RESULTS[token] = [e.get("webpage_url") or e.get("url") for e in entries if e.get("webpage_url") or e.get("url")]
-        keyboard = [[InlineKeyboardButton(f"🎵 {(e.get('title') or 'Unknown')[:55]}", callback_data=f"music:{token}:{i}")] for i, e in enumerate(entries)]
+        MUSIC_RESULTS[token] = [url for _, url in results]
+        keyboard = [[InlineKeyboardButton(f"🎵 {(e.get('title') or 'Unknown')[:55]}", callback_data=f"music:{token}:{i}")] for i, (e, _) in enumerate(results)]
         await status.edit_text("<b>🎵 MUSIC RESULTS</b>\n━━━━━━━━━━━━━━━━━━\n\nရွေးချယ်ပါ:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception:
         log.exception("music search failed")
@@ -429,9 +452,11 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if not entries:
             await status.edit_text("ရှာမတွေ့ပါ။")
             return
+        results = [(e, entry_url(e)) for e in entries]
+        results = [(e, url) for e, url in results if url]
         token = uuid.uuid4().hex[:10]
-        MUSIC_RESULTS[token] = [e.get("webpage_url") or e.get("url") for e in entries if e.get("webpage_url") or e.get("url")]
-        keyboard = [[InlineKeyboardButton(f"🎵 {(e.get('title') or 'Unknown')[:55]}", callback_data=f"music:{token}:{i}")] for i, e in enumerate(entries)]
+        MUSIC_RESULTS[token] = [url for _, url in results]
+        keyboard = [[InlineKeyboardButton(f"🎵 {(e.get('title') or 'Unknown')[:55]}", callback_data=f"music:{token}:{i}")] for i, (e, _) in enumerate(results)]
         await status.edit_text("<b>🎵 MUSIC RESULTS</b>\n\nရွေးချယ်ပါ:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception:
         log.exception("music search failed")
