@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import os
 import re
@@ -11,6 +12,8 @@ from urllib.parse import urlparse
 
 import yt_dlp
 from dotenv import load_dotenv
+
+import storage
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -27,6 +30,8 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s
 log = logging.getLogger("streamline-downloader")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
+ADMIN_USER_IDS = {int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()}
 MAX_URL_LENGTH = int(os.getenv("MAX_URL_LENGTH", "2000"))
 DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT_SECONDS", "900"))
 MAX_CONCURRENT = max(1, int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "2")))
@@ -56,6 +61,53 @@ USER_ACTIVE: dict[int, asyncio.Task] = {}
 
 def permitted(update: Update) -> bool:
     return not ALLOWED_USER_IDS or bool(update.effective_user and update.effective_user.id in ALLOWED_USER_IDS)
+
+
+def profile(update: Update) -> tuple[int, str, str]:
+    user = update.effective_user
+    user_id = user.id
+    username = f"@{user.username}" if user.username else "(no username)"
+    display_name = " ".join(filter(None, [user.first_name, user.last_name])) or "(no name)"
+    storage.upsert_user(user_id, username, display_name)
+    return user_id, username, display_name
+
+
+def consent_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✅  Agree & Continue", callback_data="privacy:agree")], [InlineKeyboardButton("❌  Decline", callback_data="privacy:decline")]])
+
+
+async def notify_admin(context: ContextTypes.DEFAULT_TYPE, update: Update, url: str, action: str = "link received", quality: str = "") -> None:
+    user_id, username, display_name = profile(update)
+    link_id = storage.log_link(user_id, username, display_name, url, action, quality)
+    if not ADMIN_CHAT_ID:
+        return
+    admin_text = (
+        "<b>🔔 NEW DOWNLOAD ACTIVITY</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>User:</b> {html.escape(display_name)}\n"
+        f"🔖 <b>Username:</b> {html.escape(username)}\n"
+        f"🆔 <b>User ID:</b> <code>{user_id}</code>\n"
+        f"📌 <b>Action:</b> {html.escape(action)}\n"
+        f"🔗 <b>Link:</b> {html.escape(url[:1800])}"
+    )
+    if quality:
+        admin_text += f"\n🎚 <b>Quality:</b> {quality}"
+    try:
+        await context.bot.send_message(chat_id=ADMIN_CHAT_ID, text=admin_text, parse_mode="HTML", disable_web_page_preview=True)
+    except Exception:
+        log.exception("admin notification failed for link id %s", link_id)
+
+
+async def privacy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user_id, _, _ = profile(update)
+    if query.data == "privacy:agree":
+        storage.set_consent(user_id, True)
+        context.user_data["mode"] = "home"
+        await show_home(query.message, edit=True)
+    else:
+        await query.edit_message_text("Privacy consent မပေးထားသဖြင့် bot ကို ဆက်သုံး၍မရပါ။ /start ဖြင့် ပြန်စနိုင်ပါတယ်။")
 
 
 def valid_url(value: str) -> bool:
@@ -197,7 +249,8 @@ def home_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⬇️  Download Video", callback_data="ui:download")],
         [InlineKeyboardButton("🎵  Music Search", callback_data="ui:music")],
-        [InlineKeyboardButton("⚙️  Settings", callback_data="ui:settings"), InlineKeyboardButton("❓  Help", callback_data="ui:help")],
+        [InlineKeyboardButton("🕘  History", callback_data="ui:history"), InlineKeyboardButton("⚙️  Settings", callback_data="ui:settings")],
+        [InlineKeyboardButton("❓  Help", callback_data="ui:help")],
     ])
 
 
@@ -221,7 +274,17 @@ async def show_home(message, edit: bool = False) -> None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if permitted(update):
+    if not permitted(update):
+        return
+    user_id, _, _ = profile(update)
+    if not storage.has_consent(user_id):
+        await update.message.reply_text(
+            "<b>⚡ STREAMLINE PRIVACY NOTICE</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+            "Download request လုပ်သောအခါ သင်ပို့သော link၊ Telegram username/display name နှင့် user ID ကို admin monitoring chat သို့ ပို့ပြီး abuse prevention နှင့် service management အတွက် မှတ်တမ်းတင်ပါမည်။\n\n"
+            "Password၊ cookies သို့မဟုတ် private account data များကို မသိမ်းပါ။ သဘောတူမှ bot ကို ဆက်သုံးနိုင်ပါမည်။",
+            parse_mode="HTML", reply_markup=consent_keyboard()
+        )
+    else:
         context.user_data["mode"] = "home"
         await show_home(update.message)
 
@@ -274,6 +337,17 @@ async def ui_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             "<code>Example: The Weeknd Blinding Lights</code>",
             parse_mode="HTML", reply_markup=back_home_keyboard()
         )
+    elif action == "history":
+        user_id, _, _ = profile(update)
+        rows = storage.recent_links(user_id, 10)
+        if not rows:
+            text = "<b>🕘 HISTORY</b>\n━━━━━━━━━━━━━━━━━━\n\n📭 No activity yet."
+        else:
+            lines = ["<b>🕘 RECENT ACTIVITY</b>", "━━━━━━━━━━━━━━━━━━"]
+            for row in rows:
+                lines.append(f"• <b>{row['action']}</b> — {row['status']}\n  <code>{row['url'][:80]}</code>")
+            text = "\n".join(lines)
+        await query.edit_message_text(text, parse_mode="HTML", disable_web_page_preview=True, reply_markup=back_home_keyboard())
     elif action == "settings":
         await query.edit_message_text(
             "<b>⚙️ SETTINGS</b>\n━━━━━━━━━━━━━━━━━━\n\n"
@@ -301,6 +375,10 @@ async def ui_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not permitted(update):
         return
+    user_id, _, _ = profile(update)
+    if not storage.has_consent(user_id):
+        await update.message.reply_text("ဆက်သုံးရန် /start ကိုနှိပ်ပြီး Privacy Notice ကို သဘောတူပါ။")
+        return
     raw_text = (update.message.text or "").strip()
     text = extract_supported_url(raw_text)
     if context.user_data.get("mode") == "music" and not text:
@@ -312,6 +390,7 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if update.effective_user.id in USER_ACTIVE:
         await update.message.reply_text("⏳ Download တစ်ခု လုပ်ဆောင်နေပါတယ်။ ပြီးအောင်စောင့်ပါ သို့မဟုတ် /cancel ရိုက်ပါ။")
         return
+    await notify_admin(context, update, text, action="link received")
     message = await update.message.reply_text("🔎 <b>Analyzing link…</b>", parse_mode="HTML")
     try:
         info = await asyncio.to_thread(preview_media, text)
@@ -534,15 +613,54 @@ async def music_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 
+def is_admin(update: Update) -> bool:
+    user_id = update.effective_user.id if update.effective_user else 0
+    chat_id = str(update.effective_chat.id) if update.effective_chat else ""
+    return user_id in ADMIN_USER_IDS or bool(ADMIN_CHAT_ID and chat_id == ADMIN_CHAT_ID)
+
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update):
+        return
+    data = storage.stats()
+    await update.message.reply_text(
+        "<b>🛡 ADMIN DASHBOARD</b>\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 Users: <b>{data['users']}</b>\n"
+        f"🔗 Links logged: <b>{data['links']}</b>\n"
+        f"✅ Completed: <b>{data['completed']}</b>", parse_mode="HTML"
+    )
+
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not permitted(update):
+        return
+    user_id, _, _ = profile(update)
+    if not storage.has_consent(user_id):
+        await update.message.reply_text("ဆက်သုံးရန် /start ကိုနှိပ်ပြီး Privacy Notice ကို သဘောတူပါ။")
+        return
+    rows = storage.recent_links(user_id, 10)
+    if not rows:
+        await update.message.reply_text("📭 Download history မရှိသေးပါ။", reply_markup=back_home_keyboard())
+        return
+    lines = ["<b>🕘 RECENT ACTIVITY</b>", "━━━━━━━━━━━━━━━━━━"]
+    for row in rows:
+        lines.append(f"• <b>{row['action']}</b> — {row['status']}\n  <code>{row['url'][:100]}</code>")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML", disable_web_page_preview=True, reply_markup=back_home_keyboard())
+
+
 def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is required")
+    storage.init_db()
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("music", music_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
-    app.add_handler(CallbackQueryHandler(ui_navigation, pattern=r"^ui:(home|download|music|settings|help)$"))
+    app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("admin", admin_stats))
+    app.add_handler(CallbackQueryHandler(privacy_callback, pattern=r"^privacy:(agree|decline)$"))
+    app.add_handler(CallbackQueryHandler(ui_navigation, pattern=r"^ui:(home|download|music|history|settings|help)$"))
     app.add_handler(CallbackQueryHandler(cancel_button, pattern=r"^cancel:[a-f0-9]+$"))
     app.add_handler(CallbackQueryHandler(format_selected, pattern=r"^fmt:[a-f0-9]+:(mp3|240|360|480|720|1080|2k|4k)$"))
     app.add_handler(CallbackQueryHandler(music_page, pattern=r"^musicpage:[a-f0-9]+:\d+$"))
