@@ -412,28 +412,71 @@ async def cancel_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text("ဒီ request သက်တမ်းကုန်သွားပါပြီ။")
 
 
+MUSIC_PAGE_SIZE = 6
+
+
+def music_keyboard(token: str, page: int, total: int) -> InlineKeyboardMarkup:
+    start = page * MUSIC_PAGE_SIZE
+    end = min(start + MUSIC_PAGE_SIZE, total)
+    rows = []
+    for index in range(start, end):
+        title = str(MUSIC_RESULTS[token]["results"][index].get("title") or "Unknown track")
+        rows.append([InlineKeyboardButton(f"🎵 {index + 1:02d} • {title[:42]}", callback_data=f"music:{token}:{index}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀  Back", callback_data=f"musicpage:{token}:{page - 1}"))
+    if end < total:
+        nav.append(InlineKeyboardButton("Next  ▶", callback_data=f"musicpage:{token}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("🔍  New Search", callback_data="ui:music"), InlineKeyboardButton("⌂  Home", callback_data="ui:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def music_card(token: str, page: int) -> tuple[str, InlineKeyboardMarkup]:
+    data = MUSIC_RESULTS.get(token)
+    if not data:
+        return "<b>🎵 SEARCH EXPIRED</b>\n\nPlease start a new search.", InlineKeyboardMarkup([[InlineKeyboardButton("🔍  New Search", callback_data="ui:music"), InlineKeyboardButton("⌂  Home", callback_data="ui:home")]])
+    results = data["results"]
+    total = len(results)
+    page = max(0, min(page, (total - 1) // MUSIC_PAGE_SIZE))
+    first = page * MUSIC_PAGE_SIZE
+    last = min(first + MUSIC_PAGE_SIZE, total)
+    text = (
+        "<b>🎵 MUSIC DISCOVERY</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"<i>{data['query'][:70]}</i>\n\n"
+        f"Showing <b>{first + 1}–{last}</b> of <b>{total}</b> tracks\n\n"
+        "Tap <b>Select this track</b> to preview its details and download MP3."
+    )
+    return text, music_keyboard(token, page, total)
+
+
 async def search_music(message, query_text: str) -> None:
     if not query_text:
         await message.reply_text("Artist နှင့် song title ကို ရိုက်ပါ။")
         return
-    status = await message.reply_text("🎵 <b>SEARCHING MUSIC…</b>", parse_mode="HTML")
+    status = await message.reply_text("🎵 <b>SEARCHING MUSIC…</b>\n\nCurating your results…", parse_mode="HTML")
     try:
         opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
         with yt_dlp.YoutubeDL(opts) as ydl:
-            data = await asyncio.to_thread(ydl.extract_info, f"ytsearch5:{query_text}", False)
-        entries = data.get("entries", [])[:5]
-        if not entries:
-            await status.edit_text("ရှာမတွေ့ပါ။")
+            data = await asyncio.to_thread(ydl.extract_info, f"ytsearch20:{query_text}", False)
+        entries = [e for e in data.get("entries", []) if e]
+        results = []
+        for entry in entries:
+            url = entry_url(entry)
+            if url:
+                results.append({"url": url, "title": entry.get("title") or "Unknown title", "channel": entry.get("channel") or entry.get("uploader") or "Unknown artist", "duration": entry.get("duration")})
+        if not results:
+            await status.edit_text("❌ No tracks found. Try another artist or title.", reply_markup=back_home_keyboard())
             return
-        results = [(e, entry_url(e)) for e in entries]
-        results = [(e, url) for e, url in results if url]
         token = uuid.uuid4().hex[:10]
-        MUSIC_RESULTS[token] = [url for _, url in results]
-        keyboard = [[InlineKeyboardButton(f"🎵 {(e.get('title') or 'Unknown')[:55]}", callback_data=f"music:{token}:{i}")] for i, (e, _) in enumerate(results)]
-        await status.edit_text("<b>🎵 MUSIC RESULTS</b>\n━━━━━━━━━━━━━━━━━━\n\nရွေးချယ်ပါ:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        MUSIC_RESULTS[token] = {"query": query_text, "results": results}
+        text, keyboard = music_card(token, 0)
+        await status.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     except Exception:
         log.exception("music search failed")
-        await status.edit_text("❌ Music search မအောင်မြင်ပါ။ နောက်တစ်ကြိမ် ပြန်စမ်းပါ။")
+        await status.edit_text("❌ Music search မအောင်မြင်ပါ။ နောက်တစ်ကြိမ် ပြန်စမ်းပါ။", reply_markup=back_home_keyboard())
 
 
 async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -443,24 +486,21 @@ async def music_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not query_text:
         await update.message.reply_text("အသုံးပြုနည်း: <code>/music artist - song title</code>", parse_mode="HTML")
         return
-    status = await update.message.reply_text("🎵 <b>Searching music…</b>", parse_mode="HTML")
+    await search_music(update.message, query_text)
+
+
+async def music_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if not permitted(update):
+        return
+    _, token, page_text = query.data.split(":")
     try:
-        opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            data = await asyncio.to_thread(ydl.extract_info, f"ytsearch5:{query_text}", False)
-        entries = data.get("entries", [])[:5]
-        if not entries:
-            await status.edit_text("ရှာမတွေ့ပါ။")
-            return
-        results = [(e, entry_url(e)) for e in entries]
-        results = [(e, url) for e, url in results if url]
-        token = uuid.uuid4().hex[:10]
-        MUSIC_RESULTS[token] = [url for _, url in results]
-        keyboard = [[InlineKeyboardButton(f"🎵 {(e.get('title') or 'Unknown')[:55]}", callback_data=f"music:{token}:{i}")] for i, (e, _) in enumerate(results)]
-        await status.edit_text("<b>🎵 MUSIC RESULTS</b>\n\nရွေးချယ်ပါ:", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception:
-        log.exception("music search failed")
-        await status.edit_text("❌ Music search မအောင်မြင်ပါ။ နောက်တစ်ကြိမ် ပြန်စမ်းပါ။")
+        page = int(page_text)
+    except ValueError:
+        page = 0
+    text, keyboard = music_card(token, page)
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def music_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -468,19 +508,30 @@ async def music_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     if not permitted(update):
         return
-    _, token, index = query.data.split(":")
-    urls = MUSIC_RESULTS.get(token, [])
+    _, token, index_text = query.data.split(":")
+    data = MUSIC_RESULTS.get(token)
     try:
-        url = urls[int(index)]
-    except (ValueError, IndexError):
-        await query.edit_message_text("Search result သက်တမ်းကုန်သွားပါပြီ။ /music နဲ့ ပြန်ရှာပါ။")
-        return
-    if not valid_url(url):
-        await query.edit_message_text("ဒီ result ကို download မလုပ်နိုင်ပါ။")
+        index = int(index_text)
+        track = data["results"][index]
+    except (TypeError, KeyError, ValueError, IndexError):
+        await query.edit_message_text("Search result သက်တမ်းကုန်သွားပါပြီ။", reply_markup=back_home_keyboard())
         return
     request_token = uuid.uuid4().hex[:10]
-    REQUESTS[request_token] = {"url": url, "user_id": update.effective_user.id}
-    await query.edit_message_text("<b>🎵 AUDIO READY</b>\n\nMP3 ကို စတင်ရန် အောက်က button ကို နှိပ်ပါ။", parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎧 Download MP3", callback_data=f"fmt:{request_token}:mp3")], [InlineKeyboardButton("✖ Cancel", callback_data=f"cancel:{request_token}")]]))
+    REQUESTS[request_token] = {"url": track["url"], "user_id": update.effective_user.id}
+    duration = human_time(track.get("duration"))
+    text = (
+        "<b>🎧 TRACK SELECTED</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>{track['title'][:180]}</b>\n"
+        f"👤 {track['channel'][:80]}   •   ⏱ {duration}\n\n"
+        "Ready to download as high-quality MP3."
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎧  Download MP3", callback_data=f"fmt:{request_token}:mp3")],
+        [InlineKeyboardButton("◀  Back to Results", callback_data=f"musicpage:{token}:{index // MUSIC_PAGE_SIZE}"), InlineKeyboardButton("🔍  New Search", callback_data="ui:music")],
+        [InlineKeyboardButton("⌂  Home", callback_data="ui:home")],
+    ])
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
 
 
 def main() -> None:
@@ -494,6 +545,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(ui_navigation, pattern=r"^ui:(home|download|music|settings|help)$"))
     app.add_handler(CallbackQueryHandler(cancel_button, pattern=r"^cancel:[a-f0-9]+$"))
     app.add_handler(CallbackQueryHandler(format_selected, pattern=r"^fmt:[a-f0-9]+:(mp3|240|360|480|720|1080|2k|4k)$"))
+    app.add_handler(CallbackQueryHandler(music_page, pattern=r"^musicpage:[a-f0-9]+:\d+$"))
     app.add_handler(CallbackQueryHandler(music_selected, pattern=r"^music:[a-f0-9]+:\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receive_url))
     log.info("Streamline Downloader started")
