@@ -43,13 +43,13 @@ SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT)
 
 FORMATS = {
     "mp3": {"label": "MP3 Audio", "selector": "bestaudio/best", "audio": True, "icon": "🎧"},
-    "240": {"label": "240p", "selector": "bestvideo[height<=240]+bestaudio/best[height<=240]", "audio": False, "icon": "📱"},
-    "360": {"label": "360p", "selector": "bestvideo[height<=360]+bestaudio/best[height<=360]", "audio": False, "icon": "📱"},
-    "480": {"label": "480p", "selector": "bestvideo[height<=480]+bestaudio/best[height<=480]", "audio": False, "icon": "📺"},
-    "720": {"label": "720p HD", "selector": "bestvideo[height<=720]+bestaudio/best[height<=720]", "audio": False, "icon": "📺"},
-    "1080": {"label": "1080p Full HD", "selector": "bestvideo[height<=1080]+bestaudio/best[height<=1080]", "audio": False, "icon": "🎬"},
-    "2k": {"label": "2K / 1440p", "selector": "bestvideo[height<=1440]+bestaudio/best[height<=1440]", "audio": False, "icon": "💎"},
-    "4k": {"label": "4K / 2160p", "selector": "bestvideo[height<=2160]+bestaudio/best[height<=2160]", "audio": False, "icon": "💎"},
+    "240": {"label": "240p", "selector": "best[height<=240]/bestvideo[height<=240]+bestaudio/best[height<=240]/best", "audio": False, "icon": "📱"},
+    "360": {"label": "360p", "selector": "best[height<=360]/bestvideo[height<=360]+bestaudio/best[height<=360]/best", "audio": False, "icon": "📱"},
+    "480": {"label": "480p", "selector": "best[height<=480]/bestvideo[height<=480]+bestaudio/best[height<=480]/best", "audio": False, "icon": "📺"},
+    "720": {"label": "720p HD", "selector": "best[height<=720]/bestvideo[height<=720]+bestaudio/best[height<=720]/best", "audio": False, "icon": "📺"},
+    "1080": {"label": "1080p Full HD", "selector": "best[height<=1080]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best", "audio": False, "icon": "🎬"},
+    "2k": {"label": "2K / 1440p", "selector": "best[height<=1440]/bestvideo[height<=1440]+bestaudio/best[height<=1440]/best", "audio": False, "icon": "💎"},
+    "4k": {"label": "4K / 2160p", "selector": "best[height<=2160]/bestvideo[height<=2160]+bestaudio/best[height<=2160]/best", "audio": False, "icon": "💎"},
 }
 
 SUPPORTED_HOSTS = {
@@ -210,8 +210,10 @@ def download_media(url: str, key: str, workdir: str, state: dict) -> tuple[str, 
     options = {
         "format": chosen["selector"], "outtmpl": output_template, "noplaylist": True,
         "restrictfilenames": True, "quiet": True, "no_warnings": True,
-        "merge_output_format": "mp4", "socket_timeout": 30, "retries": 2,
-        "max_filesize": 2 * 1024 * 1024 * 1024, "progress_hooks": [hook],
+        "merge_output_format": "mp4", "socket_timeout": 30, "retries": 5,
+        "fragment_retries": 5, "continuedl": True, "concurrent_fragment_downloads": 4,
+        "http_chunk_size": 10 * 1024 * 1024, "max_filesize": 2 * 1024 * 1024 * 1024,
+        "progress_hooks": [hook], "js_runtimes": {"deno": {}},
     }
     if chosen["audio"]:
         options["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
@@ -439,13 +441,18 @@ async def format_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         async with SEMAPHORE:
             worker = asyncio.create_task(asyncio.to_thread(download_media, request["url"], key, workdir, state))
+            deadline = time.monotonic() + DOWNLOAD_TIMEOUT
             while not worker.done():
-                await edit_progress(context.bot, status.chat_id, status.message_id, state, "⬇️ DOWNLOADING…")
+                phase_label = "🔎 RESOLVING…" if state.get("phase") == "queued" else "⬇️ DOWNLOADING…"
+                await edit_progress(context.bot, status.chat_id, status.message_id, state, phase_label)
+                if time.monotonic() >= deadline:
+                    worker.cancel()
+                    raise asyncio.TimeoutError
                 await asyncio.sleep(1.0)
                 if state.get("cancelled"):
                     worker.cancel()
                     raise asyncio.CancelledError
-            file_path, title = await asyncio.wait_for(worker, timeout=DOWNLOAD_TIMEOUT)
+            file_path, title = await worker
         await edit_progress(context.bot, status.chat_id, status.message_id, state, "🧩 PROCESSING…", force=True)
         await context.bot.send_chat_action(status.chat_id, ChatAction.UPLOAD_DOCUMENT)
         extension = ".mp3" if key == "mp3" else ".mp4"
