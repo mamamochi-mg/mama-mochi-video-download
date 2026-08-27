@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 import storage
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -34,6 +35,8 @@ ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "").strip()
 ADMIN_USER_IDS = {int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip().isdigit()}
 MAX_URL_LENGTH = int(os.getenv("MAX_URL_LENGTH", "2000"))
 DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT_SECONDS", "900"))
+UPLOAD_TIMEOUT = int(os.getenv("UPLOAD_TIMEOUT_SECONDS", "1800"))
+FAST_UPLOAD_MODE = os.getenv("FAST_UPLOAD_MODE", "1").lower() in {"1", "true", "yes"}
 MAX_CONCURRENT = max(1, int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "2")))
 ALLOWED_USER_IDS = {int(x.strip()) for x in os.getenv("ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()}
 SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT)
@@ -390,7 +393,8 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if update.effective_user.id in USER_ACTIVE:
         await update.message.reply_text("⏳ Download တစ်ခု လုပ်ဆောင်နေပါတယ်။ ပြီးအောင်စောင့်ပါ သို့မဟုတ် /cancel ရိုက်ပါ။")
         return
-    await notify_admin(context, update, text, action="link received")
+    # Do not block the user-facing flow on admin chat/network latency.
+    asyncio.create_task(notify_admin(context, update, text, action="link received"))
     message = await update.message.reply_text("🔎 <b>Analyzing link…</b>", parse_mode="HTML")
     try:
         info = await asyncio.to_thread(preview_media, text)
@@ -446,11 +450,20 @@ async def format_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await context.bot.send_chat_action(status.chat_id, ChatAction.UPLOAD_DOCUMENT)
         extension = ".mp3" if key == "mp3" else ".mp4"
         upload_name = safe_filename(title, extension)
+        caption = f"⚡ {title[:850]}\n\nQuality: {FORMATS[key]['label']}"
         with open(file_path, "rb") as media:
             if key == "mp3":
-                await context.bot.send_audio(status.chat_id, audio=media, title=title[:200], filename=upload_name, caption="⚡ Streamline Downloader")
+                await context.bot.send_audio(status.chat_id, audio=media, title=title[:200], filename=upload_name, caption="⚡ Streamline Downloader", read_timeout=UPLOAD_TIMEOUT, write_timeout=UPLOAD_TIMEOUT, connect_timeout=60, pool_timeout=60)
+            elif FAST_UPLOAD_MODE:
+                # Document upload avoids Telegram video processing and is usually faster for large files.
+                await context.bot.send_document(status.chat_id, document=media, filename=upload_name, caption=caption, read_timeout=UPLOAD_TIMEOUT, write_timeout=UPLOAD_TIMEOUT, connect_timeout=60, pool_timeout=60)
             else:
-                await context.bot.send_video(status.chat_id, video=media, caption=f"⚡ {title[:850]}\n\nQuality: {FORMATS[key]['label']}", filename=upload_name, supports_streaming=True)
+                try:
+                    await context.bot.send_video(status.chat_id, video=media, caption=caption, filename=upload_name, supports_streaming=True, read_timeout=UPLOAD_TIMEOUT, write_timeout=UPLOAD_TIMEOUT, connect_timeout=60, pool_timeout=60)
+                except Exception:
+                    log.exception("send_video failed; retrying as document")
+                    media.seek(0)
+                    await context.bot.send_document(status.chat_id, document=media, filename=upload_name, caption=caption, read_timeout=UPLOAD_TIMEOUT, write_timeout=UPLOAD_TIMEOUT, connect_timeout=60, pool_timeout=60)
         await query.edit_message_text("<b>✅ COMPLETE</b>\n\nဖိုင်ကို အောင်မြင်စွာ ပို့ပြီးပါပြီ။ နောက်ထပ် link ပို့နိုင်ပါတယ်။", parse_mode="HTML")
     except asyncio.CancelledError:
         await context.bot.send_message(status.chat_id, "🛑 Download ကို ရပ်လိုက်ပါပြီ။")
@@ -652,7 +665,9 @@ def main() -> None:
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is required")
     storage.init_db()
-    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
+    upload_request = HTTPXRequest(connect_timeout=60, read_timeout=UPLOAD_TIMEOUT, write_timeout=UPLOAD_TIMEOUT, pool_timeout=60, connection_pool_size=max(8, MAX_CONCURRENT + 4))
+    polling_request = HTTPXRequest(connect_timeout=60, read_timeout=45, write_timeout=60, pool_timeout=30, connection_pool_size=4)
+    app = Application.builder().token(BOT_TOKEN).request(upload_request).get_updates_request(polling_request).concurrent_updates(True).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("music", music_command))
