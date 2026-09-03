@@ -53,9 +53,9 @@ FORMATS = {
 }
 
 SUPPORTED_HOSTS = {
-    "youtube.com", "www.youtube.com", "youtu.be", "m.youtube.com",
-    "tiktok.com", "www.tiktok.com", "vm.tiktok.com",
-    "facebook.com", "www.facebook.com", "m.facebook.com", "fb.watch",
+    "youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be", "m.youtube.com",
+    "tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com", "vt.tiktok.com",
+    "facebook.com", "www.facebook.com", "web.facebook.com", "m.facebook.com", "fb.watch",
 }
 REQUESTS: dict[str, dict] = {}
 MUSIC_RESULTS: dict[str, list[str]] = {}
@@ -405,14 +405,28 @@ async def receive_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         title = (info.get("title") or "Unknown title")[:180]
         uploader = (info.get("uploader") or info.get("channel") or "Unknown")[:80]
         duration = human_time(info.get("duration"))
+        width, height = info.get("width"), info.get("height")
+        resolution = f"{width}×{height}" if width and height else "Auto"
+        estimated_size = human_size(info.get("filesize") or info.get("filesize_approx"))
         preview = (
-            "<b>✅ LINK READY</b>\n\n"
-            f"🎞 <b>{title}</b>\n"
-            f"👤 {uploader}\n"
-            f"⏱ {duration}\n\n"
+            "<b>✅ LINK READY</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎞 <b>{html.escape(title)}</b>\n"
+            f"👤 {html.escape(uploader)}\n"
+            f"⏱ {duration}   •   📐 {resolution}\n"
+            f"📦 Estimated: {estimated_size}\n\n"
             "ရွေးချယ်မည့် format ကို နှိပ်ပါ:"
         )
-        await message.edit_text(preview, parse_mode="HTML", reply_markup=format_keyboard(token))
+        thumbnail = info.get("thumbnail")
+        if thumbnail:
+            try:
+                await context.bot.send_photo(chat_id=message.chat_id, photo=thumbnail, caption=preview, parse_mode="HTML", reply_markup=format_keyboard(token))
+                await message.delete()
+            except Exception:
+                log.exception("thumbnail preview failed; falling back to text preview")
+                await context.bot.edit_message_text(preview, chat_id=message.chat_id, message_id=message.message_id, parse_mode="HTML", reply_markup=format_keyboard(token))
+        else:
+            await message.edit_text(preview, parse_mode="HTML", reply_markup=format_keyboard(token))
     except Exception:
         log.exception("metadata preview failed")
         await message.edit_text("❌ ဒီ link ကို ဖတ်မရပါ။ Public/authorized link ဖြစ်ကြောင်း စစ်ပြီး ပြန်ပို့ပါ။")
